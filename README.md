@@ -1,6 +1,6 @@
-# ipistorm
+# lockstorm
 
-Create lots of IPIs! Lock up your box!
+Lock performance tests
 
 ## Building
 

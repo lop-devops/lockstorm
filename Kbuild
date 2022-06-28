@@ -1,1 +1,1 @@
-obj-m  := ipistorm.o
+obj-m  := lockstorm.o

@@ -1,6 +1,4 @@
 /*
- * Stress smp_call_function
- *
  * Copyright 2017-2020 Anton Blanchard, IBM Corporation <anton@linux.ibm.com>
  *
  * This program is free software; you can redistribute it and/or
@@ -9,7 +7,7 @@
  * 2 of the License, or (at your option) any later version.
  */
 
-#define pr_fmt(fmt) "ipistorm: " fmt
+#define pr_fmt(fmt) "lockstorm: " fmt
 
 #include <linux/module.h>
 #include <linux/kthread.h>
@@ -46,17 +44,26 @@ MODULE_PARM_DESC(cpulist, "List of CPUs (default all)");
 static unsigned int num_cpus;
 static atomic_t running;
 
-static DECLARE_COMPLETION(ipistorm_done);
+static DECLARE_COMPLETION(lockstorm_done);
 
-static void do_nothing_ipi(void *dummy)
-{
-}
+struct obj {
+	spinlock_t spinlock;
+	int taken;
+};
 
-static int ipistorm_thread(void *data)
+static __cacheline_aligned struct obj obj;
+
+static int lockstorm_thread(void *data)
 {
-	unsigned long mycpu = (unsigned long)data;
-	unsigned long target_cpu;
-	unsigned long jiffies_start;
+//	unsigned long mycpu = (unsigned long)data;
+	unsigned long t;
+	u64 iters = 0;
+	ktime_t start, end;
+	int prev_taken = -1;
+	int max_taken = 0;
+	int min_taken = INT_MAX;
+	int max_sequential = 0;
+	int cur_sequential = 0;
 
 	atomic_inc(&running);
 
@@ -65,49 +72,54 @@ static int ipistorm_thread(void *data)
 			schedule();
 	}
 
-	if (mask) {
-		unsigned long base = mycpu & ~mask;
-		unsigned long off = (mycpu + offset) & mask;
-		target_cpu = (base + off) % num_cpus;
-	} else {
-		target_cpu = (mycpu + offset) % num_cpus;
+	t = jiffies + timeout*HZ;
+
+	start = ktime_get();
+
+	iters = 0;
+	while (time_before(jiffies, t)) {
+		int taken = obj.taken;
+
+		spin_lock(&obj.spinlock);
+		if (obj.taken == prev_taken) {
+			cur_sequential++;
+		} else if (cur_sequential > max_sequential) {
+			max_sequential = cur_sequential;
+			cur_sequential = 0;
+		}
+		prev_taken = obj.taken;
+		if (obj.taken - taken < min_taken)
+			min_taken = obj.taken - taken;
+		if (obj.taken - taken < max_taken)
+			max_taken = obj.taken - taken;
+		obj.taken++;
+		spin_unlock(&obj.spinlock);
+
+		iters++;
+
+		if (atomic_read(&running) < num_cpus)
+			break;
 	}
+	end = ktime_get();
 
-	pr_info("%lu -> %lu\n", mycpu, target_cpu);
-
-	if (single && !cpu_online(target_cpu)) {
-		pr_err("CPU %lu not online\n", target_cpu);
-		return 0;
-	}
-
-	jiffies_start = jiffies;
-
-	while (jiffies < (jiffies_start + timeout*HZ)) {
-		if (single)
-			smp_call_function_single(target_cpu,
-						 do_nothing_ipi, NULL, wait);
-		else
-			smp_call_function(do_nothing_ipi, NULL, wait);
-
-		if (delay)
-			usleep_range(delay, delay+1);
-		else
-			cond_resched();
-	}
+	printk("%llu locks in %lluns\n", iters, ktime_sub_ns(end, start));
 
 	if (atomic_dec_and_test(&running))
-		complete(&ipistorm_done);
+		complete(&lockstorm_done);
 
 	return 0;
 }
 
-static int __init ipistorm_init(void)
+static int __init lockstorm_init(void)
 {
 	unsigned long cpu;
 	cpumask_var_t mask;
 	int ret = 0;
 
-	init_completion(&ipistorm_done);
+	spin_lock_init(&obj.spinlock);
+	obj.taken = 0;
+
+	init_completion(&lockstorm_done);
 
 	if (!zalloc_cpumask_var(&mask, GFP_KERNEL))
 		return -ENOMEM;
@@ -130,8 +142,8 @@ static int __init ipistorm_init(void)
 
 	for_each_cpu(cpu, mask) {
 		struct task_struct *p;
-		p = kthread_create(ipistorm_thread, (void *)cpu,
-				   "ipistorm/%lu", cpu);
+		p = kthread_create(lockstorm_thread, (void *)cpu,
+				   "lockstorm/%lu", cpu);
 		if (IS_ERR(p)) {
 			pr_err("kthread_create on CPU %lu failed\n", cpu);
 			atomic_inc(&running);
@@ -146,14 +158,14 @@ out_free:
 	return ret;
 }
 
-static void __exit ipistorm_exit(void)
+static void __exit lockstorm_exit(void)
 {
-	wait_for_completion(&ipistorm_done);
+	wait_for_completion(&lockstorm_done);
 }
 
-module_init(ipistorm_init)
-module_exit(ipistorm_exit)
+module_init(lockstorm_init)
+module_exit(lockstorm_exit)
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Anton Blanchard");
-MODULE_DESCRIPTION("Stress smp_call_function");
+MODULE_DESCRIPTION("Lock testing");
