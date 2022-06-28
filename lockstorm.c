@@ -9,6 +9,7 @@
 
 #define pr_fmt(fmt) "lockstorm: " fmt
 
+#include <linux/limits.h>
 #include <linux/module.h>
 #include <linux/kthread.h>
 #include <linux/delay.h>
@@ -59,6 +60,9 @@ static int lockstorm_thread(void *data)
 	unsigned long t;
 	u64 iters = 0;
 	ktime_t start, end;
+	ktime_t lock, granted;
+	u64 max_wait = 0;
+	u64 min_wait = U64_MAX;
 	int prev_taken = -1;
 	int max_taken = 0;
 	int min_taken = INT_MAX;
@@ -80,7 +84,14 @@ static int lockstorm_thread(void *data)
 	while (time_before(jiffies, t)) {
 		int taken = obj.taken;
 
+		lock = ktime_get();
 		spin_lock(&obj.spinlock);
+		granted = ktime_get();
+		if (ktime_sub_ns(granted, lock) < min_wait)
+			min_wait = ktime_sub_ns(granted, lock);
+		if (ktime_sub_ns(granted, lock) > max_wait)
+			max_wait = ktime_sub_ns(granted, lock);
+
 		if (obj.taken == prev_taken) {
 			cur_sequential++;
 		} else if (cur_sequential > max_sequential) {
@@ -106,6 +117,8 @@ static int lockstorm_thread(void *data)
 
 	if (atomic_dec_and_test(&running))
 		complete(&lockstorm_done);
+
+	pr_info("CPU%04d: max starve:%d min starve:%d max sequential:%d max wait:%lluns min wait:%lluns", smp_processor_id(), max_taken, min_taken, max_sequential, max_wait, min_wait);
 
 	return 0;
 }
