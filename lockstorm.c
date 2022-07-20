@@ -54,6 +54,13 @@ struct obj {
 
 static __cacheline_aligned struct obj obj;
 
+static int gmax_starve[NR_CPUS];
+static int gmin_starve[NR_CPUS];
+static int gmax_sequential[NR_CPUS];
+static u64 gmin_wait[NR_CPUS];
+static u64 gmax_wait[NR_CPUS];
+static u64 gnr_locks[NR_CPUS];
+
 static int lockstorm_thread(void *data)
 {
 //	unsigned long mycpu = (unsigned long)data;
@@ -92,16 +99,18 @@ static int lockstorm_thread(void *data)
 		if (ktime_sub_ns(granted, lock) > max_wait)
 			max_wait = ktime_sub_ns(granted, lock);
 
-		if (obj.taken == prev_taken) {
+		if (obj.taken == prev_taken + 1)
 			cur_sequential++;
-		} else if (cur_sequential > max_sequential) {
-			max_sequential = cur_sequential;
+		else
 			cur_sequential = 0;
-		}
+
+		if (cur_sequential > max_sequential)
+			max_sequential = cur_sequential;
+
 		prev_taken = obj.taken;
 		if (obj.taken - taken < min_taken)
 			min_taken = obj.taken - taken;
-		if (obj.taken - taken < max_taken)
+		if (obj.taken - taken > max_taken)
 			max_taken = obj.taken - taken;
 		obj.taken++;
 		spin_unlock(&obj.spinlock);
@@ -113,12 +122,14 @@ static int lockstorm_thread(void *data)
 	}
 	end = ktime_get();
 
-	printk("%llu locks in %lluns\n", iters, ktime_sub_ns(end, start));
-
+	gmax_starve[smp_processor_id()] = max_taken;
+	gmin_starve[smp_processor_id()] = min_taken;
+	gmax_sequential[smp_processor_id()] = max_sequential;
+	gmax_wait[smp_processor_id()] = max_wait;
+	gmin_wait[smp_processor_id()] = min_wait;
+	gnr_locks[smp_processor_id()] = iters;
 	if (atomic_dec_and_test(&running))
 		complete(&lockstorm_done);
-
-	pr_info("CPU%04d: max starve:%d min starve:%d max sequential:%d max wait:%lluns min wait:%lluns", smp_processor_id(), max_taken, min_taken, max_sequential, max_wait, min_wait);
 
 	return 0;
 }
@@ -165,15 +176,66 @@ static int __init lockstorm_init(void)
 			wake_up_process(p);
 		}
 	}
+	wait_for_completion(&lockstorm_done);
+
+	if (1) {
+		int max_max_starve = 0;
+		int min_max_starve = INT_MAX;
+		int max_min_starve = 0;
+		int min_min_starve = INT_MAX;
+		int max_max_sequential = 0;
+		int min_max_sequential = INT_MAX;
+		u64 max_max_wait = 0;
+		u64 min_max_wait = U64_MAX;
+		u64 max_min_wait = 0;
+		u64 min_min_wait = U64_MAX;
+		u64 max_nr_locks = 0;
+		u64 min_nr_locks = U64_MAX;
+		u64 nr_locks = 0;
+
+		for_each_cpu(cpu, mask) {
+			if (gmax_starve[cpu] > max_max_starve)
+				max_max_starve = gmax_starve[cpu];
+			if (gmax_starve[cpu] < min_max_starve)
+				min_max_starve = gmax_starve[cpu];
+
+			if (gmin_starve[cpu] > max_min_starve)
+				max_min_starve = gmin_starve[cpu];
+			if (gmin_starve[cpu] < min_min_starve)
+				min_min_starve = gmin_starve[cpu];
+
+			if (gmax_sequential[cpu] > max_max_sequential)
+				max_max_sequential = gmax_sequential[cpu];
+			if (gmax_sequential[cpu] < min_max_sequential)
+				min_max_sequential = gmax_sequential[cpu];
+
+			if (gmax_wait[cpu] > max_max_wait)
+				max_max_wait = gmax_wait[cpu];
+			if (gmax_wait[cpu] < min_max_wait)
+				min_max_wait = gmax_wait[cpu];
+
+			if (gmin_wait[cpu] > max_min_wait)
+				max_min_wait = gmin_wait[cpu];
+			if (gmin_wait[cpu] < min_min_wait)
+				min_min_wait = gmin_wait[cpu];
+
+			nr_locks += gnr_locks[cpu];
+			if (gnr_locks[cpu] > max_nr_locks)
+				max_nr_locks = gnr_locks[cpu];
+			if (gnr_locks[cpu] < min_nr_locks)
+				min_nr_locks = gnr_locks[cpu];
+		}
+
+		pr_notice("locks:%llu (max:%llu min:%llu) max wait:%llu (min:%llu) min wait:%llu (max:%llu) max starve:%d (min:%d) min starve:%d (max:%d) max sequential:%d (min:%d)\n", nr_locks, max_nr_locks, min_nr_locks, max_max_wait, min_max_wait, min_min_wait, max_min_wait, max_max_starve, min_max_starve, min_min_starve, max_min_starve, max_max_sequential, min_max_sequential);
+	}
 
 out_free:
 	free_cpumask_var(mask);
-	return ret;
+	return ret ? ret : -EAGAIN;
 }
 
 static void __exit lockstorm_exit(void)
 {
-	wait_for_completion(&lockstorm_done);
 }
 
 module_init(lockstorm_init)
