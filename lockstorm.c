@@ -75,6 +75,7 @@ static int lockstorm_thread(void *data)
 	int min_taken = INT_MAX;
 	int max_sequential = 0;
 	int cur_sequential = 0;
+	int taken;
 
 	atomic_inc(&running);
 
@@ -88,11 +89,12 @@ static int lockstorm_thread(void *data)
 	start = ktime_get();
 
 	iters = 0;
+	taken = obj.taken;
 	while (time_before(jiffies, t)) {
-		int taken = obj.taken;
-
 		lock = ktime_get();
 		spin_lock(&obj.spinlock);
+		if (iters == 0 || atomic_read(&running) < num_cpus)
+			goto next;
 		granted = ktime_get();
 		if (ktime_sub_ns(granted, lock) < min_wait)
 			min_wait = ktime_sub_ns(granted, lock);
@@ -113,6 +115,8 @@ static int lockstorm_thread(void *data)
 		if (obj.taken - taken > max_taken)
 			max_taken = obj.taken - taken;
 		obj.taken++;
+next:
+		taken = obj.taken;
 		spin_unlock(&obj.spinlock);
 
 		iters++;
