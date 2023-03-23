@@ -76,7 +76,7 @@ static __inline__ bool tas_lock(unsigned int *v, int eh)
 "2:"
 	: "=&r" (t), "+m" (*v)
 	: "r" (v), "r"(1), "i" (eh)
-	: "cc", "xer");
+	: "cc", "xer", "memory");
 
 	return t;
 }
