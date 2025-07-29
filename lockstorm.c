@@ -132,8 +132,7 @@ static int lockstorm_thread(void *data)
 	prev_taken = 0;
 	while (time_before(jiffies, t)) {
 		lock = ktime_get();
-//		spin_lock(&obj->spinlock);
-		spin_lock2(obj);
+		spin_lock(&obj->spinlock);
 		taken = obj->taken++;
 		if (iters == 0 || atomic_read(&running) < num_cpus)
 			goto next;
@@ -157,8 +156,7 @@ static int lockstorm_thread(void *data)
 		if (tdelta > max_taken)
 			max_taken = tdelta;
 next:
-//		spin_unlock(&obj->spinlock);
-		spin_unlock2(obj);
+		spin_unlock(&obj->spinlock);
 
 		prev_taken = taken;
 
@@ -297,7 +295,7 @@ static int __init lockstorm_init(void)
 	for_each_cpu(cpu, mask) {
 		struct task_struct *p;
 
-		if (use_atomics)
+		if (!use_atomics)
 			p = kthread_create(lockstorm_thread, obj,
 						"lockstorm/%lu", cpu);
 		else
